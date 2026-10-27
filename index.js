@@ -1067,6 +1067,7 @@ const LOGIN_KEY = /^(login|loggedin|oauth|authorization|authorized|account|accou
  * name, so an `apiKeyEnv` next to a DashScope base URL still finds DashScope.
  */
 const PROVIDER_GUIDES = [
+  { match: /ollama|:11434/i, label: '本地 Ollama', applyUrl: 'https://ollama.com/download', note: '这一项默认指向本机 Ollama（http://localhost:11434），本地模型不需要 API Key；只有换成云端嵌入服务时才需要填对应服务的 key。' },
   { match: /deepseek/i, label: 'DeepSeek 开放平台', applyUrl: 'https://platform.deepseek.com/api_keys', note: '在「API keys」页创建密钥，复制形如 sk-… 的字符串。' },
   { match: /dashscope|bailian|qwen|aliyun|token-plan/i, label: '阿里云百炼（DashScope）', applyUrl: 'https://bailian.console.aliyun.com/', note: '在控制台「API-KEY」页创建密钥，形如 sk-…。' },
   { match: /anthropic|claude/i, label: 'Anthropic 控制台', applyUrl: 'https://console.anthropic.com/settings/keys', note: '创建 API key 后复制。' },
@@ -1152,6 +1153,7 @@ async function collectRequirements(ctx) {
     const seen = new Set()
 
     for (const { path, description } of fromSchema) {
+      if (underDisabledBranch(effective, path)) continue
       const key = path.split('.').at(-1) ?? path
       if (isSecretKey(key)) {
         const value = readPath(effective, path)
@@ -1168,7 +1170,7 @@ async function collectRequirements(ctx) {
             status: 'missing',
             authorize: authorizeBinding(flowKeys, info.id, path),
             guidance: resolveGuidance({
-              haystack: `${info.id} ${path} ${bundle?.name ?? ''}`,
+              haystack: `${urlHaystackAt(effective, path)} ${info.id} ${path} ${bundle?.name ?? ''}`,
               hint: description,
               kind: 'secret',
             }),
@@ -1178,8 +1180,12 @@ async function collectRequirements(ctx) {
     }
 
     walkConfig(effective, '', (key, path, value, parent) => {
-      const baseURL = isRecord(parent) && typeof parent.baseURL === 'string' ? parent.baseURL : ''
-      const haystack = `${baseURL} ${info.id} ${bundle?.name ?? ''} ${bundle?.meta?.title ?? ''}`
+      const parentUrl = isRecord(parent)
+        ? ['baseURL', 'endpoint', 'url', 'host', 'apiBase']
+            .map((field) => (typeof parent[field] === 'string' ? parent[field] : ''))
+            .join(' ')
+        : ''
+      const haystack = `${parentUrl} ${info.id} ${bundle?.name ?? ''} ${bundle?.meta?.title ?? ''}`
       if (isEnvKey(key) && typeof value === 'string' && value !== '') {
         const present = typeof process.env[value] === 'string' && process.env[value] !== ''
         items.push({
@@ -1238,7 +1244,9 @@ function walkConfig(value, prefix, visit, depth = 0) {
   for (const [key, entry] of Object.entries(value)) {
     const path = prefix === '' ? key : `${prefix}.${key}`
     visit(key, path, entry, value)
-    if (isRecord(entry)) walkConfig(entry, path, visit, depth + 1)
+    // A feature that is switched off never needs its credentials, so its
+    // subtree contributes no requirement.
+    if (isRecord(entry) && entry.enabled !== false) walkConfig(entry, path, visit, depth + 1)
   }
 }
 
@@ -1249,6 +1257,41 @@ function readPath(value, path) {
     cursor = cursor[segment]
   }
   return cursor
+}
+
+/**
+ * Whether a config path sits under a branch switched off with `enabled: false`.
+ * @param config - The row's effective config.
+ * @param path - Dot path of the field.
+ * @returns True when an ancestor disables the feature.
+ */
+function underDisabledBranch(config, path) {
+  const segments = String(path).split('.')
+  let cursor = config
+  for (const segment of segments.slice(0, -1)) {
+    if (!isRecord(cursor)) return false
+    cursor = cursor[segment]
+    if (isRecord(cursor) && cursor.enabled === false) return true
+  }
+  return false
+}
+
+/**
+ * Service URLs configured next to a field, used to recognise its provider.
+ * @param config - The row's effective config.
+ * @param path - Dot path of the field.
+ * @returns Space-joined URLs, empty when none are configured.
+ */
+function urlHaystackAt(config, path) {
+  const segments = String(path).split('.')
+  let cursor = config
+  for (const segment of segments.slice(0, -1)) {
+    cursor = isRecord(cursor) ? cursor[segment] : undefined
+  }
+  if (!isRecord(cursor)) return ''
+  return ['baseURL', 'endpoint', 'url', 'host', 'apiBase']
+    .map((field) => (typeof cursor[field] === 'string' ? cursor[field] : ''))
+    .join(' ')
 }
 
 async function handleRequirements(ctx, request, response) {
