@@ -1204,12 +1204,46 @@ const KIND_LABEL = {
   skip: '跳过',
 }
 
-function formatRequirement(item) {
-  if (item.kind === 'env') {
-    return `环境变量 ${item.envName}（${item.status === 'ready' ? '已设置' : '未设置'}）· ${item.title}`
+/**
+ * Every registered tool must declare how its result is presented; the registry
+ * rejects a definition without `output` outright.
+ */
+const TEXT_OUTPUT = {
+  schema: { type: 'string', description: '面向模型的文本结果。' },
+  render(_args, value) {
+    return [{ type: 'text', text: String(value) }]
+  },
+}
+
+/**
+ * Fold the per-row requirement list into one entry per distinct credential,
+ * naming every row that needs it. Several rows in one bundle often read the
+ * same environment variable, and repeating it per row reads as several problems.
+ * @param items - Requirement items from `collectRequirements`.
+ * @returns One group per distinct requirement, each listing its owning rows.
+ */
+function groupRequirements(items) {
+  const groups = new Map()
+  for (const item of items) {
+    const key = item.kind === 'env'
+      ? `env:${item.envName}`
+      : `${item.kind}:${item.entryId}:${item.path}`
+    const group = groups.get(key)
+    if (group === undefined) groups.set(key, { item, rows: [item.rowId] })
+    else if (!group.rows.includes(item.rowId)) group.rows.push(item.rowId)
   }
-  if (item.kind === 'login') return `登录 ${item.title}（${item.path}，需到该插件自己的设置页完成）`
-  return `密钥 ${item.title} · ${item.path}（${item.status === 'ready' ? '已填写' : '未填写'}）`
+  return [...groups.values()]
+}
+
+function formatRequirement(group) {
+  const rows = group.rows.join('、')
+  if (group.item.kind === 'env') {
+    const state = group.item.status === 'ready' ? '已设置' : '未设置'
+    return `环境变量 ${group.item.envName}（${state}）· 行 ${rows}`
+  }
+  if (group.item.kind === 'login') return `登录 ${rows}（需到该插件自己的设置页完成）`
+  const state = group.item.status === 'ready' ? '已填写' : '未填写'
+  return `密钥 ${group.item.path}（${state}）· 行 ${rows}`
 }
 
 function formatPlan(payload, plan) {
@@ -1246,8 +1280,9 @@ async function formatApplyOutcome(ctx, outcome) {
     lines.push('凭据检查：没有待补齐的项。')
     return lines.join('\n')
   }
-  lines.push(`还有 ${missing.length} 项凭据待补齐（设置 → 分享与同步 → 首次配置 可直接填写）：`)
-  for (const item of missing) lines.push(`- ${formatRequirement(item)}`)
+  const groups = groupRequirements(missing)
+  lines.push(`还有 ${groups.length} 项凭据待补齐（设置 → 分享与同步 → 首次配置 可直接填写）：`)
+  for (const group of groups) lines.push(`- ${formatRequirement(group)}`)
   return lines.join('\n')
 }
 
@@ -1277,6 +1312,7 @@ function createImportTool(ctx) {
       },
       required: ['code'],
     },
+    output: TEXT_OUTPUT,
     execute: async (args) => {
       const code = isRecord(args) && typeof args.code === 'string' ? args.code : ''
       let payload
@@ -1304,12 +1340,14 @@ function createRequirementsTool(ctx) {
     name: 'profile_share_requirements',
     description: '列出当前 profile 仍缺的凭据：配置里的密钥、未设置的环境变量、需要手动完成的登录态。分享码导入后用它引导用户补齐。',
     parameters: { type: 'object', properties: {} },
+    output: TEXT_OUTPUT,
     execute: async () => {
       const items = await collectRequirements(ctx)
       const missing = items.filter((item) => item.status !== 'ready')
-      const lines = [`[dsh-profile-share] 检出 ${items.length} 项，其中待补齐 ${missing.length} 项`]
-      for (const item of missing) lines.push(`- ${formatRequirement(item)}`)
-      if (missing.length === 0) lines.push('没有待补齐的项。')
+      const groups = groupRequirements(missing)
+      const lines = [`[dsh-profile-share] 检出 ${items.length} 项，其中待补齐 ${groups.length} 项`]
+      for (const group of groups) lines.push(`- ${formatRequirement(group)}`)
+      if (groups.length === 0) lines.push('没有待补齐的项。')
       return lines.join('\n')
     },
   }
