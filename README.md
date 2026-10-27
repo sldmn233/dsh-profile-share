@@ -1,108 +1,137 @@
-# DSH Profile Sync · 分享与同步
+# dsh-profile-share
 
-Turn your DSH plugin setup into **one pasteable line**. Someone else pastes it and gets your
-plugins, their enabled state, and your explicit configuration; later lines carry only the delta.
-The same page then tells each machine which API keys, environment variables and logins it still
-has to supply for itself.
+**English** | [简体中文](README.zh-CN.md)
 
-一个 DSH 插件，把当前 profile 的插件选择、启用状态与显式配置打包成**一条可粘贴的分享码**；
-别人粘贴即可复刻同一套 DSH，之后发新码只同步差异，并在同一页里补齐各自机器缺的凭据。
+> Share a DSH plugin setup as one pasteable code.
 
-> 你的 dsh 很好，现在它是我的了。
+`dsh-profile-share` packages the plugins you selected in a DSH profile — their enabled state and
+your explicit configuration — into a single short code. Another machine pastes that code and ends
+up with the same setup; subsequent codes carry only what changed. The same page then reports which
+API keys, environment variables and logins each machine still has to supply for itself, because
+credentials never travel in the code.
 
-## Install · 安装
+## Features
+
+- **Export** — pick plugins (all / none / invert), generate one `DSH-SHARE/1:` code. Suspected
+  credential fields are stripped by default and every stripped path is listed.
+- **Apply** — paste a code, preview the exact diff, then apply it. Only additions and updates by
+  default; nothing is disabled or removed unless you turn on full alignment.
+- **First-run configuration** — one page listing the credentials a machine still needs, with the
+  secret fields writable there and login-only plugins linked to their own settings.
+
+## Requirements
+
+- A DSH profile that mounts the `pluginManager` and `configEditor` services (the desktop and web
+  profiles of DSH 0.2.x do). Endpoints answer `503` with an explicit message when either is absent.
+- Node.js `^22.19.0 || >=24.0.0` for the host half.
+- The receiving machine needs this plugin installed too; a share code alone cannot bootstrap it.
+
+## Installation
 
 ```sh
 dsh plugin add https://github.com/sldmn233/dsh-profile-share
 ```
 
-Or install the checkout as a local directory from the plugin manager. Restart DSH once after
-installing; the page lives at **Settings → 分享与同步** (id `profile-sync`, order 45).
+Or, from the plugin manager, install this checkout as a local directory. Restart DSH once after
+installing. The page lives in **Settings → 分享与同步** (section id `profile-sync`).
 
-装好后重启一次 DSH，入口在 **设置 → 分享与同步**；也可以用插件页的「本地目录」安装本仓库。
+## Usage
 
-## What it does · 功能
+### 1. Export a code
 
-| 能力 | 行为 |
-| --- | --- |
-| 分享 | 勾选插件（全选/反选）→ 生成 `DSH-SHARE/1:` 分享码；默认剥离疑似密钥字段并列出被剥离的路径 |
-| 同步 | 粘贴码 → 预览差异 → 应用。默认只新增/更新；勾「完整对齐」才会禁用对方已有、但码里没有的 profile 插件 |
-| 首次配置 | 逐项列出缺的 API Key、环境变量与需手动完成的登录态；密钥项可直接在该页写入 |
+Open **Settings → 分享与同步 → 分享**, tick the plugins you want to carry over, and press
+**生成分享码**. The result is one line of text; copy it and send it however you like.
 
-## How a handoff works · 怎么给对方
+### 2. Apply a code
 
-1. Install this plugin once (the repo URL above), then share codes freely.
-2. Paste the code in **同步**, preview the diff, apply.
-3. Open **首次配置** and fill in your own keys — the sender's secrets are never in the code.
+On the other machine open the **同步** tab, paste the code, press **预览**, and read the plan:
+installations, enable/disable switches, and configuration writes. Press **应用** to run it.
 
-## Not the same as a profile-to-profile mover · 与「profile 之间搬运」的区别
+### 3. Finish credentials
 
-[`wbb316/dsh-profile-sync`](https://github.com/wbb316/dsh-profile-sync) moves a plugin set
-between two profiles on one machine and deliberately installs nothing. This plugin is for the
-cross-machine, cross-person case: the code is self-contained, the receiving DSH installs and
-enables the delta itself through the host's plugin manager, and it never needs the sender's
-machine. Both exist on purpose.
+Open **首次配置**. Every detected requirement is listed as a secret, an environment variable, or a
+login. Fill in your own values — the sender's keys were never in the code.
 
-## How it works · 实现
+## Share code format
 
-The Host half (`index.js`) only uses public services, so the Loader keeps owning validation,
+The code is `gzip(JSON)` encoded as base64url behind a `DSH-SHARE/1:` prefix. The version suffix is
+checked: a code from an incompatible format is rejected instead of being half-applied. The payload
+holds the selected bundles (name, version, install spec, enabled state), the explicit profile
+configuration of each row, and the sender's profile name and DSH version for the header.
+
+## How it works
+
+The host half (`index.js`) uses only public services, so the Loader keeps owning schema validation,
 the profile file lock and hot reload:
 
-- `pluginManager.listBundles()` / `listPlugins()` — live inventory;
-- `configEditor.configuration()` — each row's explicit profile override; writes go through
-  `configEditor.edit()`;
-- `installBundle()` / `setBundleEnabled()` / `setPluginEnabled()` — installation and switches.
+| Service call | Purpose |
+| --- | --- |
+| `pluginManager.listBundles()` / `listPlugins()` | read the live inventory |
+| `configEditor.configuration()` | read each row's explicit profile override |
+| `configEditor.edit()` | write a row's configuration back through the profile patch |
+| `installBundle()` / `setBundleEnabled()` / `setPluginEnabled()` | install and switch |
 
-The share code is `gzip(JSON)` as base64url with a `DSH-SHARE/1:` prefix; a mismatched version
-fails loudly instead of half-applying. Six endpoints under `/api/dsh-profile-sync/`:
-`state`, `export`, `preview`, `apply`, `requirements`, `configure`. Writes require
-`application/json` and a same-origin request, and reuse the host's `connection.requestRejection`
-admission decision.
+Six endpoints live under `/api/dsh-profile-sync/`: `state`, `export`, `preview`, `apply`,
+`requirements`, `configure`. Writes require `application/json` and a same-origin request, and reuse
+the host's own `connection.requestRejection` admission decision.
 
-The Client half (`client.js`) is one `settings.section` page, `require('react')` only, no build
-step.
+The client half (`client.js`) is a single `settings.section` page registered through
+`ctx.slots.register`, requires only `react`, and has no build step.
 
-## Boundaries · 语义边界
+## Security
 
-- Bundles provided by the DSH installation (`availability: 'installation'`) are never installed —
-  they ship with DSH — but their configuration overrides are still shared, because that is what
-  reproduces your setup (default model, theme size, providers).
-- Bundles the sender has not installed are not shared; `stats.uninstalled` reports them.
-- Registry sources install as declared (`name@version`); `git+…` / `file:…` declarations pass
-  through unchanged rather than being guessed.
-- **完整对齐** is off by default: nothing is disabled or removed unless you ask for it.
-- Secrets are stripped on export by default; opt in only when you really mean to move a key.
+- Suspected credentials (`apiKey`, `token`, `secret`, `password`, `cookie`, …) are removed on export
+  by default, and the removed paths are reported. Enabling **包含可能的密钥字段** is an explicit,
+  deliberate action.
+- The code carries `apiKeyEnv`-style variable names, not the keys they name.
+- Writes are same-origin only and go through the profile's own configuration editor, so every change
+  is a normal, reviewable profile patch.
 
-## Files · 目录
+## Behavior notes
+
+- Bundles provided by the DSH installation itself (`availability: 'installation'`) are never
+  installed; they ship with DSH. Their configuration overrides are still shared, because that is
+  what reproduces the setup.
+- Bundles the sender has not installed are not shared and are reported as `stats.uninstalled`.
+- Registry sources install as declared; `git+…` and `file:…` declarations pass through unchanged
+  rather than being guessed at as `name@version`.
+- Full alignment is off by default: nothing is disabled or removed unless you ask for it.
+
+## Differences from similar plugins
+
+[`wbb316/dsh-profile-sync`](https://github.com/wbb316/dsh-profile-sync) moves a plugin set between
+two profiles on one machine and deliberately installs nothing. This plugin targets the machine-to-
+machine, person-to-person case: the code is self-contained and the receiving DSH installs and
+enables the delta itself. Both exist on purpose.
+
+## Project layout
 
 ```
-index.js           Host half: six endpoints, snapshot codec, plan/apply engine
-client.js          Client half: the settings page (three tabs)
-cordis.patch.yml   bundle patch inserting the row
-locale/            localized plugin title and description
-test/              offline harness (mock services) + real share-code fixtures
+index.js            Host half: six endpoints, snapshot codec, plan/apply engine
+client.js           Client half: the settings page (three tabs)
+cordis.patch.yml    Bundle patch inserting the row
+locale/             Localized plugin title and description
+test/local-smoke.mjs  Offline harness driving the real handlers against mock services
 ```
 
-## Self-test · 自测
+## Development
+
+No build step, no runtime dependencies.
 
 ```sh
-npm run check                     # syntax
-node test/local-smoke.mjs         # drives the real handlers against mock services
+npm run check              # syntax-check both halves
+node test/local-smoke.mjs  # run the offline harness
 ```
 
-The harness covers export/secret stripping, idempotent replay, install→enable→write on an empty
-profile, requirement detection, `configure` path allow-listing, cross-origin rejection, shipped
-bundles never scheduled for install, row-level enable sync, reload route collisions, and both
-directions of a real share code (replay your own, and an empty receiver).
+The harness covers export and secret stripping, idempotent replay, install → enable → write on an
+empty profile, requirement detection, `configure` path allow-listing, cross-origin rejection,
+installation-provided bundles never being scheduled for install, row-level enable sync, and route
+registration collisions during a hot reload.
 
-## Known limits · 已知取舍
+## Contributing
 
-- The settings navigation icon is chosen by the shell from the section id, so this page shows the
-  generic gear regardless of its `icon` option.
-- Login-only plugins cannot be completed from this page; it links them to their own settings.
-- Host-side edits need a restart when the row is already in a failed state; `client.js` changes
-  only need a page refresh.
+Issues and pull requests are welcome: <https://github.com/sldmn233/dsh-profile-share/issues>.
 
 ## License
 
-MIT
+[MIT](LICENSE)
