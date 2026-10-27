@@ -483,6 +483,21 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const handleCopyBootstrap = async () => {
+        if (exportResult === null) return;
+        const code = typeof exportResult.code === 'string' ? exportResult.code : '';
+        if (code === '') return;
+        const text = [
+          '帮我安装这个 DSH 插件：https://github.com/sldmn233/dsh-profile-share',
+          '装好后用 profile_share_import 导入下面这条分享码，先给我看计划，我确认后再用 apply=true 执行：',
+          code,
+        ].join('\n');
+        const copied = await copyToClipboard(text);
+        setCopyNote(copied
+          ? '已复制「引导语 + 分享码」，可直接整段发给对方'
+          : '浏览器不允许写入剪贴板，请手动复制下方分享码并附上仓库地址');
+      };
+
       const groups = useMemo(() => {
         const thirdParty = [];
         const official = [];
@@ -610,6 +625,7 @@ window.__ModuleLoader__.load({
           }),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
             h(Button, { onClick: handleCopy }, '复制'),
+            h(Button, { onClick: handleCopyBootstrap }, '复制引导语（含码）'),
             h('span', { style: mutedStyle }, exportStatsText(stats)),
             copyNote !== '' ? h('span', { style: mutedStyle }, copyNote) : null),
           stale
@@ -670,8 +686,8 @@ window.__ModuleLoader__.load({
               color: 'inherit',
             },
           },
-            h('li', null, '先把本插件装一次：把 dsh-profile-sync 整个目录发给对方，让对方在插件页用「本地目录」安装（或执行 dsh plugin add <目录>）。'),
-            h('li', null, '把上面生成的分享码发过去，对方在「同步」页粘贴 → 预览 → 应用。'),
+            h('li', null, '点「复制引导语（含码）」，把整段发给对方：对方的 DSH 会先问你确认要不要装本插件，装好后给出导入计划，你确认才执行。'),
+            h('li', null, '也可以手动：把 https://github.com/sldmn233/dsh-profile-share 发给对方，装好后在「同步」页粘贴 → 预览 → 应用。'),
             h('li', null, '对方切到「首次配置」，补齐自己的 API Key、环境变量与登录态。')),
           h('div', { style: microStyle }, '之后你这边新增或修改了插件，重新生成一条码发过去，对方再「预览 → 应用」即可增量同步；默认只新增/更新，不会禁用或删除对方已有、但码里没有的插件。')));
     }

@@ -110,6 +110,7 @@ function createProfile() {
 
 function createCtx(profile, options = {}) {
   const routes = new Map()
+  const registeredTools = new Map()
   const manager = {
     async listBundles() {
       return profile.bundles
@@ -178,6 +179,27 @@ function createCtx(profile, options = {}) {
         return () => routes.delete(route.path)
       },
     },
+    inject(_dependencies, callback) {
+      const tools = {
+        register(definition) {
+          registeredTools.set(definition.name, definition)
+          return () => registeredTools.delete(definition.name)
+        },
+      }
+      const toolsCtx = {
+        tools,
+        effect(callback, _label) {
+          const iterator = callback()
+          if (iterator !== undefined && typeof iterator.next === 'function') {
+            let step = iterator.next()
+            while (step.done !== true) step = iterator.next(step.value)
+          }
+          return () => {}
+        },
+      }
+      callback(toolsCtx)
+      return () => {}
+    },
     get(name) {
       if (name === 'pluginManager') return manager
       if (name === 'configEditor') return editor
@@ -186,6 +208,7 @@ function createCtx(profile, options = {}) {
     },
   }
   apply(ctx)
+  routes.tools = registeredTools
   return routes
 }
 
@@ -582,6 +605,9 @@ log('a reload colliding with the previous generation waits instead of failing')
     get() {
       return undefined
     },
+    inject() {
+      return () => {}
+    },
   }
   apply(ctx)
   assert.equal(registered.length, 0, 'nothing is registered while the previous generation still owns the paths')
@@ -609,6 +635,42 @@ log('a non-duplicate registration failure is reported, not thrown into a timer')
   }
   assert.throws(() => apply(ctx), /route table is closed/)
   console.log('ok: unrelated registration errors stay synchronous failures')
+}
+
+log('agent tools drive the same plan and apply engine')
+{
+  const sender = createProfile()
+  const senderRoutes = createCtx(sender)
+  const exported = await call(senderRoutes, 'export', { method: 'POST', body: { bundles: ['alpha'] } })
+
+  const peer = createProfile()
+  peer.installed = new Set()
+  peer.defaultRows = new Map(peer.rows)
+  peer.rows = new Map()
+  const peerRoutes = createCtx(peer)
+
+  const importTool = peerRoutes.tools.get('profile_share_import')
+  const requirementsTool = peerRoutes.tools.get('profile_share_requirements')
+  assert.ok(importTool !== undefined, 'profile_share_import registered')
+  assert.ok(requirementsTool !== undefined, 'profile_share_requirements registered')
+  assert.equal(importTool.parameters.required[0], 'code')
+
+  const preview = await importTool.execute({ code: exported.json.code })
+  assert.match(preview, /mode=preview/)
+  assert.match(preview, /待执行：安装 1 个/)
+  assert.equal(peer.installs.length, 0, 'preview must not install anything')
+
+  const applied = await importTool.execute({ code: exported.json.code, apply: true })
+  assert.match(applied, /mode=apply/)
+  assert.match(applied, /changed=1/)
+  assert.equal(peer.installs.length, 1, 'apply installs')
+
+  const bad = await importTool.execute({ code: 'not-a-code' })
+  assert.match(bad, /无法解析/)
+
+  const requirements = await requirementsTool.execute({})
+  assert.match(requirements, /\[dsh-profile-share\]/)
+  console.log('ok: tools preview → apply → requirements; bad code reported, not thrown')
 }
 
 console.log('\nAll local smoke checks passed.')

@@ -50,6 +50,31 @@ dsh plugin add https://github.com/sldmn233/dsh-profile-share
 打开 **首次配置**。检测到的每一项都会标注它是密钥、环境变量还是登录态。填**你自己的**值——
 发送方的密钥从来没有进过分享码。
 
+## 在还没装插件的机器上接码
+
+分享码无法安装它自己的解读者，所以交接从一段话开始。**分享** 标签页的 **复制引导语（含码）**
+按钮复制出来的就是：
+
+```
+帮我安装这个 DSH 插件：https://github.com/sldmn233/dsh-profile-share
+装好后用 profile_share_import 导入下面这条分享码，先给我看计划，我确认后再用 apply=true 执行：
+DSH-SHARE/1:…
+```
+
+接收方的 agent 读到这段话后，会先问你要不要安装这个插件——这就是那一步「确认」——然后用插件管理器
+装上，调 `profile_share_import` 出一份计划，你同意后再执行，最后把仍缺的凭据列给你，和
+**首次配置** 页面是同一份清单。
+
+为什么需要这段引导语而不是全自动：裸 DSH 里没有任何东西能在「认得 `DSH-SHARE/1:` 的插件」装好
+之前认出这个前缀。要彻底去掉这段话，得在 DSH 内核里加前缀识别；在那之前，这两行提示就是接缝。
+
+### Agent 工具
+
+| 工具 | 用途 |
+| --- | --- |
+| `profile_share_import` | 预览分享码；`apply: true` 时执行 |
+| `profile_share_requirements` | 列出本 profile 仍缺的凭据 |
+
 ## 分享码格式
 
 分享码是 `gzip(JSON)` 的 base64url 编码，前缀 `DSH-SHARE/1:`。版本号会被校验：格式不兼容的码会

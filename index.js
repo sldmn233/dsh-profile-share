@@ -50,6 +50,12 @@ export function apply(ctx) {
   }
   const dispose = mountRoutes(ctx)
   OWNED_ROUTES.set(ctx, dispose)
+  ctx.inject(['tools'], (toolsCtx) => {
+    toolsCtx.effect(function* () {
+      yield toolsCtx.tools.register(createImportTool(ctx))
+      yield toolsCtx.tools.register(createRequirementsTool(ctx))
+    }, 'dsh-profile-share: model tools')
+  })
   return () => {
     OWNED_ROUTES.delete(ctx)
     dispose()
@@ -922,7 +928,24 @@ async function handleApply(ctx, request, response) {
   }
   const body = await readJson(request)
   const payload = decodeCode(body.code)
-  const plan = await buildPlan(ctx, payload, body.fullAlign === true)
+  const outcome = await runApply(ctx, payload, body.fullAlign === true)
+  writeJson(response, 200, {
+    ok: true,
+    changed: outcome.changed,
+    restartRequired: outcome.restartRequired,
+    results: outcome.results,
+  })
+}
+
+/**
+ * Plan a snapshot against this profile and execute every pending step.
+ * @param ctx - Cordis context.
+ * @param payload - Validated snapshot.
+ * @param fullAlign - Also disable profile bundles the code does not contain.
+ * @returns The plan, its executed steps, the change count, and whether a restart is needed.
+ */
+async function runApply(ctx, payload, fullAlign) {
+  const plan = await buildPlan(ctx, payload, fullAlign)
   const { manager } = services(ctx)
   const results = []
   let restartRequired = false
@@ -984,7 +1007,7 @@ async function handleApply(ctx, request, response) {
     }
   }
 
-  writeJson(response, 200, { ok: true, changed, restartRequired, results })
+  return { plan, results, changed, restartRequired }
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,4 +1188,129 @@ async function handleConfigure(ctx, request, response) {
   const next = setPath(current, path, value)
   await editor.edit(entry, () => next)
   writeJson(response, 200, { ok: true, changed: true })
+}
+
+// ---------------------------------------------------------------------------
+// Agent tools: the bootstrap path for a machine that only received a code
+// ---------------------------------------------------------------------------
+
+const INSTALL_URL = 'https://github.com/sldmn233/dsh-profile-share'
+
+const KIND_LABEL = {
+  install: '安装',
+  enable: '启用',
+  disable: '禁用',
+  config: '写入配置',
+  skip: '跳过',
+}
+
+function formatRequirement(item) {
+  if (item.kind === 'env') {
+    return `环境变量 ${item.envName}（${item.status === 'ready' ? '已设置' : '未设置'}）· ${item.title}`
+  }
+  if (item.kind === 'login') return `登录 ${item.title}（${item.path}，需到该插件自己的设置页完成）`
+  return `密钥 ${item.title} · ${item.path}（${item.status === 'ready' ? '已填写' : '未填写'}）`
+}
+
+function formatPlan(payload, plan) {
+  const pending = plan.steps.filter((step) => step.status === 'pending')
+  const rowCount = payload.bundles.reduce((total, bundle) => total + bundle.rows.length, 0)
+  const lines = [
+    '[dsh-profile-share] mode=preview',
+    `bundles=${payload.bundles.length} rows=${rowCount}`,
+  ]
+  if (pending.length === 0) {
+    lines.push('待执行：无（当前 profile 已经与分享码一致）')
+    return lines.join('\n')
+  }
+  lines.push(`待执行：安装 ${plan.summary.install} 个 · 插件开关 ${plan.summary.bundleToggle} 项 · 写入配置 ${plan.summary.config} 项`)
+  for (const step of pending) lines.push(`- ${KIND_LABEL[step.kind] ?? step.kind} ${step.target}（${step.detail}）`)
+  lines.push('把这段计划给用户确认后，用同样的 code 加 apply=true 再调用一次。')
+  return lines.join('\n')
+}
+
+async function formatApplyOutcome(ctx, outcome) {
+  const lines = [
+    '[dsh-profile-share] mode=apply',
+    `changed=${outcome.changed} restartRequired=${outcome.restartRequired}`,
+  ]
+  for (const result of outcome.results) {
+    if (result.status === 'skipped') continue
+    lines.push(`[${result.status}] ${KIND_LABEL[result.kind] ?? result.kind} ${result.target}${result.error === undefined ? '' : `：${result.error}`}`)
+  }
+  if (outcome.changed === 0) lines.push('没有产生变更（当前 profile 已与分享码一致）。')
+  if (outcome.restartRequired) lines.push('部分插件需要重启 DSH 才会生效。')
+  const items = await collectRequirements(ctx)
+  const missing = items.filter((item) => item.status !== 'ready')
+  if (missing.length === 0) {
+    lines.push('凭据检查：没有待补齐的项。')
+    return lines.join('\n')
+  }
+  lines.push(`还有 ${missing.length} 项凭据待补齐（设置 → 分享与同步 → 首次配置 可直接填写）：`)
+  for (const item of missing) lines.push(`- ${formatRequirement(item)}`)
+  return lines.join('\n')
+}
+
+/**
+ * Import tool. Preview by default so the agent can show the plan and get the
+ * user's confirmation before anything is installed or written.
+ * @param ctx - Cordis context owning the services.
+ * @returns Tool definition.
+ */
+function createImportTool(ctx) {
+  return {
+    name: 'profile_share_import',
+    description: [
+      '导入一条 DSH 分享码（以 DSH-SHARE/1: 开头），把对方的插件选择、启用状态与配置覆盖复刻到当前 profile。',
+      'apply 省略或 false 时只返回计划（要安装/启用的插件、要写入的配置），供你向用户确认；apply=true 才真正执行。',
+      `当前 DSH 若还未安装本插件，先用 plugin_manager 安装 ${INSTALL_URL} 再调用。`,
+    ].join(''),
+    parameters: {
+      type: 'object',
+      properties: {
+        code: { type: 'string', description: '完整分享码，包含 DSH-SHARE/1: 前缀。' },
+        apply: { type: 'boolean', description: 'true 才执行；省略或 false 只预览计划。' },
+        fullAlign: {
+          type: 'boolean',
+          description: 'true 时同时禁用当前 profile 有、但分享码里没有的 profile 插件。',
+        },
+      },
+      required: ['code'],
+    },
+    execute: async (args) => {
+      const code = isRecord(args) && typeof args.code === 'string' ? args.code : ''
+      let payload
+      try {
+        payload = decodeCode(code)
+      } catch (error) {
+        return `[dsh-profile-share] 分享码无法解析：${error instanceof Error ? error.message : String(error)}`
+      }
+      const fullAlign = isRecord(args) && args.fullAlign === true
+      if (!isRecord(args) || args.apply !== true) {
+        return formatPlan(payload, await buildPlan(ctx, payload, fullAlign))
+      }
+      return await formatApplyOutcome(ctx, await runApply(ctx, payload, fullAlign))
+    },
+  }
+}
+
+/**
+ * Requirement listing tool, used to walk the user through first-run setup.
+ * @param ctx - Cordis context owning the services.
+ * @returns Tool definition.
+ */
+function createRequirementsTool(ctx) {
+  return {
+    name: 'profile_share_requirements',
+    description: '列出当前 profile 仍缺的凭据：配置里的密钥、未设置的环境变量、需要手动完成的登录态。分享码导入后用它引导用户补齐。',
+    parameters: { type: 'object', properties: {} },
+    execute: async () => {
+      const items = await collectRequirements(ctx)
+      const missing = items.filter((item) => item.status !== 'ready')
+      const lines = [`[dsh-profile-share] 检出 ${items.length} 项，其中待补齐 ${missing.length} 项`]
+      for (const item of missing) lines.push(`- ${formatRequirement(item)}`)
+      if (missing.length === 0) lines.push('没有待补齐的项。')
+      return lines.join('\n')
+    },
+  }
 }

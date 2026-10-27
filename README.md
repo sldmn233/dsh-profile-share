@@ -52,6 +52,33 @@ installations, enable/disable switches, and configuration writes. Press **应用
 Open **首次配置**. Every detected requirement is listed as a secret, an environment variable, or a
 login. Fill in your own values — the sender's keys were never in the code.
 
+## Bootstrap on a machine that does not have the plugin
+
+A share code cannot install its own reader, so a handoff starts with one message. The **分享**
+tab's **复制引导语（含码）** button copies exactly this:
+
+```
+帮我安装这个 DSH 插件：https://github.com/sldmn233/dsh-profile-share
+装好后用 profile_share_import 导入下面这条分享码，先给我看计划，我确认后再用 apply=true 执行：
+DSH-SHARE/1:…
+```
+
+The receiving agent reads it, asks whether to install the plugin — that is the confirmation step —
+installs it through the plugin manager, calls `profile_share_import` for a preview, applies it once
+you agree, and then reports what is still missing, which is the same list the **首次配置** page
+shows.
+
+Why the message instead of full automation: nothing in a bare DSH can recognise a `DSH-SHARE/1:`
+string before the plugin that understands it is installed. A prefix detector in DSH core would
+remove the message entirely; until then this two-line prompt is the seam.
+
+### Agent tools
+
+| Tool | Purpose |
+| --- | --- |
+| `profile_share_import` | preview a share code, or apply it with `apply: true` |
+| `profile_share_requirements` | list the credentials this profile still lacks |
+
 ## Share code format
 
 The code is `gzip(JSON)` encoded as base64url behind a `DSH-SHARE/1:` prefix. The version suffix is
