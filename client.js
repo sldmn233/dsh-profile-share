@@ -1000,14 +1000,25 @@ window.__ModuleLoader__.load({
         if (guidance === null || typeof guidance !== 'object') return null;
         const rows = [];
         if (typeof guidance.provider === 'string' && typeof guidance.applyUrl === 'string' && guidance.applyUrl !== '') {
-          rows.push(h('div', { key: 'apply', style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
-            h('span', { style: mutedStyle }, '去 ' + guidance.provider + ' 申请：'),
-            h('a', {
-              href: guidance.applyUrl,
-              target: '_blank',
-              rel: 'noreferrer',
-              style: { color: 'inherit', textDecoration: 'underline', fontWeight: 600 },
-            }, '打开申请页 →')));
+          rows.push(h('div', { key: 'apply', style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 } },
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 } },
+              h('span', { style: mutedStyle }, '去哪里申请：'),
+              h('a', {
+                href: guidance.applyUrl,
+                target: '_blank',
+                rel: 'noreferrer',
+                style: {
+                  color: 'inherit',
+                  textDecoration: 'none',
+                  fontWeight: 600,
+                  border: '1px solid ' + BORDER,
+                  borderRadius: 6,
+                  padding: '4px 10px',
+                  background: 'rgba(128,128,128,.10)',
+                  whiteSpace: 'nowrap',
+                },
+              }, guidance.provider + ' 申请页 →')),
+            h('div', { style: { ...monoPlainStyle, opacity: 0.6, wordBreak: 'break-all' } }, guidance.applyUrl)));
         }
         if (typeof guidance.note === 'string' && guidance.note !== '') {
           rows.push(h('div', { key: 'note', style: microStyle }, guidance.note));
@@ -1204,6 +1215,7 @@ window.__ModuleLoader__.load({
         const kind = typeof item.kind === 'string' ? item.kind : 'other';
         const bundleName = typeof item.bundle === 'string' && item.bundle !== '' ? item.bundle : '';
         const configPath = typeof item.path === 'string' && item.path !== '' ? item.path : '';
+        const rowIdValue = typeof item.rowId === 'string' && item.rowId !== '' ? item.rowId : '';
         const title = typeof item.title === 'string' && item.title !== ''
           ? item.title
           : (typeof item.label === 'string' && item.label !== ''
@@ -1225,10 +1237,8 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 } },
             h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, flex: '1 1 220px', minWidth: 0 } },
               h('div', { style: { fontWeight: 600, wordBreak: 'break-word' } }, title),
-              h('div', { style: { ...monoPlainStyle, opacity: 0.65 } },
-                bundleName !== '' && configPath !== ''
-                  ? bundleName + ' · ' + configPath
-                  : (bundleName !== '' ? bundleName : configPath))),
+              h('div', { style: { ...monoPlainStyle, opacity: 0.65, wordBreak: 'break-word' } },
+                [bundleName, rowIdValue, configPath].filter((part) => part !== '').join(' · '))),
             h(Badge, {
               tone: status === 'ready' ? 'ok' : status === 'missing' ? 'bad' : 'neutral',
             }, status === 'ready'
