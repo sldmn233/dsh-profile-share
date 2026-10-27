@@ -1,0 +1,5 @@
+node_modules/
+*.log
+report*.json
+test/sample-code*.txt
+.DS_Store

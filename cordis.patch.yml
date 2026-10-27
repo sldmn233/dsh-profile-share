@@ -1,0 +1,5 @@
+# Host half owns the share-code endpoints; the Client half owns the settings page.
+- insert:
+    - id: profile-sync
+      name: '@sldmn233/dsh-profile-sync'
+      config: {}
