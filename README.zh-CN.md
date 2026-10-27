@@ -50,6 +50,18 @@ dsh plugin add https://github.com/sldmn233/dsh-profile-share
 打开 **首次配置**。检测到的每一项都会标注它是密钥、环境变量还是登录态。填**你自己的**值——
 发送方的密钥从来没有进过分享码。
 
+这一页不会只给一个输入框。每一项都带着本插件能证明的信息：
+
+- 申请页：按环境变量名、配置里的 `baseURL`、行 id 或 bundle 名匹配出是哪家服务
+  （DeepSeek、阿里云百炼、OpenAI、Anthropic、Google、Moonshot、智谱、MiniMax、硅基流动、
+  OpenRouter、火山方舟、Groq、WorkBuddy）；
+- 环境变量给出可直接复制的 `setx` / `export` 命令，不用背语法；
+- 如果插件自己的 config schema 给字段写了说明，这里一并显示。
+
+如果某项能对上 `ctx.authorization` 里已注册的流程，还会多一个 **直接授权** 按钮：流程在后台跑，
+它给出的链接和问题会回到这一页，写进去的是**插件自己的凭据记录**，而不是本插件猜某个配置字段。
+需要密钥的流程不允许在对话里回答——agent 工具会拒绝，并让你回页面填写。
+
 ## 在还没装插件的机器上接码
 
 分享码无法安装它自己的解读者，所以交接从一段话开始。**分享** 标签页的 **复制引导语（含码）**
@@ -73,7 +85,8 @@ DSH-SHARE/1:…
 | 工具 | 用途 |
 | --- | --- |
 | `profile_share_import` | 预览分享码；`apply: true` 时执行 |
-| `profile_share_requirements` | 列出本 profile 仍缺的凭据 |
+| `profile_share_requirements` | 列出本 profile 仍缺的凭据，并给出与页面相同的申请指引 |
+| `profile_share_authorize` | 列出授权流程、发起、查看提问、回答非密钥类问题、取消 |
 
 ## 分享码格式
 

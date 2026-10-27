@@ -52,6 +52,21 @@ installations, enable/disable switches, and configuration writes. Press **应用
 Open **首次配置**. Every detected requirement is listed as a secret, an environment variable, or a
 login. Fill in your own values — the sender's keys were never in the code.
 
+The page never shows a bare input box. Every item carries what the plugin can actually prove:
+
+- the provider's application page, matched from the environment variable name, the configured base
+  URL, the row id or the bundle name (DeepSeek, 阿里云百炼, OpenAI, Anthropic, Google, Moonshot,
+  智谱, MiniMax, 硅基流动, OpenRouter, 火山方舟, Groq, WorkBuddy);
+- a copyable `setx` / `export` command for environment variables, so the value does not depend on
+  remembering the syntax;
+- the field's own description from the plugin's config schema, when it documents itself.
+
+Requirements that match a flow registered through `ctx.authorization` also get a **直接授权**
+button. The flow runs in the background: its links and its questions come back to this page, and
+whatever it commits is the plugin's own credential record — not this plugin guessing at a config
+field. Flows that ask for a secret are never answered from chat; the agent tool refuses and points
+at the page instead.
+
 ## Bootstrap on a machine that does not have the plugin
 
 A share code cannot install its own reader, so a handoff starts with one message. The **分享**
@@ -77,7 +92,8 @@ remove the message entirely; until then this two-line prompt is the seam.
 | Tool | Purpose |
 | --- | --- |
 | `profile_share_import` | preview a share code, or apply it with `apply: true` |
-| `profile_share_requirements` | list the credentials this profile still lacks |
+| `profile_share_requirements` | list the credentials this profile still lacks, with the same guidance the page shows |
+| `profile_share_authorize` | list authorization flows, start one, read its prompts, answer a non-secret one, or cancel |
 
 ## Share code format
 

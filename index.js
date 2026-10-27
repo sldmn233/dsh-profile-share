@@ -1696,8 +1696,14 @@ function createRequirementsTool(ctx) {
       if (groups.length === 0) lines.push('没有待补齐的项。')
       const flows = readFlows(ctx)
       if (flows.length > 0) {
-        lines.push(`可一键授权 ${flows.length} 个（页面「首次配置」有按钮，或用 profile_share_authorize action=start）：`)
-        for (const flow of flows) lines.push(`- ${flow.label}（key=${flow.key}${flow.inFlight ? '，进行中' : ''}）`)
+        const wanted = groups.map((group) => group.item.authorize).filter((key) => typeof key === 'string' && key !== '')
+        const relevant = flows.filter((flow) => wanted.includes(flow.key))
+        lines.push(`另有 ${flows.length} 个可一键授权入口（页面「首次配置」里有按钮）`)
+        if (relevant.length > 0) {
+          lines.push('与本页待补齐项直接对应的：')
+          for (const flow of relevant) lines.push(`- ${flow.label}（key=${flow.key}）`)
+        }
+        lines.push('查看全部：profile_share_authorize action=list')
       }
       return lines.join('\n')
     },
@@ -1711,8 +1717,21 @@ function formatAttempt(mode, attempt) {
     const code = notice.code === null || notice.code === undefined ? '' : `（码：${notice.code}）`
     lines.push(`- ${notice.message}${url}${code}`)
   }
+  const pending = attempt.pending === undefined || attempt.pending === null ? null : attempt.pending
+  if (pending !== null) {
+    lines.push(`等待输入：${pending.message}`)
+    if (pending.kind === 'select') {
+      const options = Array.isArray(pending.options) ? pending.options : []
+      lines.push(`可选项：${options.map((option) => option.label !== undefined ? option.label : option.id).join(' / ')}`)
+      lines.push('把用户的选择用 action=answer value=<选项 id> 提交。')
+    } else if (pending.kind === 'secret') {
+      lines.push('这是密钥类输入：请让用户在 设置 → 分享与同步 → 首次配置 里填写，不要发到对话里。')
+    } else {
+      lines.push('把用户的回答用 action=answer value=<回答> 提交。')
+    }
+  }
   if (attempt.error !== null && attempt.error !== undefined) lines.push(`错误：${attempt.error}`)
-  if (attempt.status === 'running') {
+  if (attempt.status === 'running' && pending === null) {
     lines.push('流程进行中：把上面带链接的通知交给用户，完成后再查一次 action=status。')
   }
   return lines.join('\n')
@@ -1727,13 +1746,14 @@ function formatAttempt(mode, attempt) {
 function createAuthorizeTool(ctx) {
   return {
     name: 'profile_share_authorize',
-    description: '列出一键授权入口，或发起/查看/取消一次授权（action=list|start|status|cancel）。发起后返回该流程给出的链接与状态；需要人工输入的流程会明确失败，此时应引导用户去插件自己的设置页完成。',
+    description: '列出一键授权入口，或发起/查看/回答/取消一次授权（action=list|start|status|answer|cancel）。发起后返回该流程给出的链接、状态与等待输入的问题；密钥类输入一律不在对话里提交，要引导用户去页面填写。',
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'start', 'status', 'cancel'], description: '要执行的动作。' },
+        action: { type: 'string', enum: ['list', 'start', 'status', 'answer', 'cancel'], description: '要执行的动作。' },
         key: { type: 'string', description: 'start / cancel 时的凭据键，取自 action=list 的结果。' },
         method: { type: 'string', description: '可选：该流程提供的授权方式 id。' },
+        value: { type: 'string', description: 'action=answer 时用户的回答；密钥类问题会被拒绝。' },
       },
       required: ['action'],
     },
@@ -1768,9 +1788,26 @@ function createAuthorizeTool(ctx) {
           } catch {
             // Already settled; the abort below still ends the attempt.
           }
+          attempt.reject?.(new Error('授权已取消'))
           attempt.controller.abort()
           attempt.status = 'cancelled'
           return '[dsh-profile-share] 已取消当前授权。'
+        }
+        if (action === 'answer') {
+          const attempt = AUTHORIZATION_ATTEMPT.current
+          const pending = attempt === null ? null : attempt.pending
+          if (pending === null || pending === undefined) return '[dsh-profile-share] 当前没有等待回答的授权步骤。'
+          if (pending.kind === 'secret') {
+            return '[dsh-profile-share] 这是密钥类输入，请不要在对话里发送；请让用户在 设置 → 分享与同步 → 首次配置 里填写。'
+          }
+          const value = isRecord(args) && typeof args.value === 'string' ? args.value.trim() : ''
+          if (value === '') return '[dsh-profile-share] 缺少 value。'
+          const resolve = attempt.resolve
+          attempt.pending = null
+          attempt.resolve = null
+          attempt.reject = null
+          if (typeof resolve === 'function') resolve(value)
+          return '[dsh-profile-share] 已提交，等待流程继续；用 action=status 查看结果。'
         }
         const attempt = attemptView()
         return attempt === null ? '[dsh-profile-share] 当前没有进行中的授权。' : formatAttempt('status', attempt)
