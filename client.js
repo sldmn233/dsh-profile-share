@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@sldmn233/dsh-profile-sync',
+  id: '@sldmn233/dsh-profile-share',
   factory(require) {
     const React = require('react');
     const h = React.createElement;

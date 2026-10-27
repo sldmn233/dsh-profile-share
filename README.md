@@ -13,7 +13,7 @@ has to supply for itself.
 ## Install · 安装
 
 ```sh
-dsh plugin add https://github.com/sldmn233/dsh-profile-sync
+dsh plugin add https://github.com/sldmn233/dsh-profile-share
 ```
 
 Or install the checkout as a local directory from the plugin manager. Restart DSH once after
@@ -34,6 +34,14 @@ installing; the page lives at **Settings → 分享与同步** (id `profile-sync
 1. Install this plugin once (the repo URL above), then share codes freely.
 2. Paste the code in **同步**, preview the diff, apply.
 3. Open **首次配置** and fill in your own keys — the sender's secrets are never in the code.
+
+## Not the same as a profile-to-profile mover · 与「profile 之间搬运」的区别
+
+[`wbb316/dsh-profile-sync`](https://github.com/wbb316/dsh-profile-sync) moves a plugin set
+between two profiles on one machine and deliberately installs nothing. This plugin is for the
+cross-machine, cross-person case: the code is self-contained, the receiving DSH installs and
+enables the delta itself through the host's plugin manager, and it never needs the sender's
+machine. Both exist on purpose.
 
 ## How it works · 实现
 
