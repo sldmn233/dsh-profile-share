@@ -54,6 +54,7 @@ export function apply(ctx) {
     toolsCtx.effect(function* () {
       yield toolsCtx.tools.register(createImportTool(ctx))
       yield toolsCtx.tools.register(createRequirementsTool(ctx))
+      yield toolsCtx.tools.register(createAuthorizeTool(ctx))
     }, 'dsh-profile-share: model tools')
   })
   return () => {
@@ -136,6 +137,11 @@ const ROUTES = [
   ['apply', handleApply],
   ['requirements', handleRequirements],
   ['configure', handleConfigure],
+  ['flows', handleFlows],
+  ['authorize/start', handleAuthorizeStart],
+  ['authorize/status', handleAuthorizeStatus],
+  ['authorize/answer', handleAuthorizeAnswer],
+  ['authorize/cancel', handleAuthorizeCancel],
 ]
 
 // ---------------------------------------------------------------------------
@@ -1026,7 +1032,12 @@ function schemaFields(schema, prefix, out, depth = 0) {
     }
     return
   }
-  if (prefix !== '') out.push(prefix)
+  if (prefix !== '') {
+    const description = typeof schema?.description === 'string' && schema.description !== ''
+      ? schema.description
+      : undefined
+    out.push({ path: prefix, description })
+  }
 }
 
 function entrySchema(entry) {
@@ -1051,12 +1062,85 @@ function bundleOfRow(inventory, patchId) {
 const LOGIN_KEY = /^(login|loggedin|oauth|authorization|authorized|account|accounts|signin|subscription|subscriptions|connectors|connector|cookie|session|cookieJar)$/i
 
 /**
+ * Where each well-known provider hands out credentials. Matched against the
+ * environment variable name, the configured base URL, the row id and the bundle
+ * name, so an `apiKeyEnv` next to a DashScope base URL still finds DashScope.
+ */
+const PROVIDER_GUIDES = [
+  { match: /deepseek/i, label: 'DeepSeek 开放平台', applyUrl: 'https://platform.deepseek.com/api_keys', note: '在「API keys」页创建密钥，复制形如 sk-… 的字符串。' },
+  { match: /dashscope|bailian|qwen|aliyun|token-plan/i, label: '阿里云百炼（DashScope）', applyUrl: 'https://bailian.console.aliyun.com/', note: '在控制台「API-KEY」页创建密钥，形如 sk-…。' },
+  { match: /anthropic|claude/i, label: 'Anthropic 控制台', applyUrl: 'https://console.anthropic.com/settings/keys', note: '创建 API key 后复制。' },
+  { match: /gemini|google/i, label: 'Google AI Studio', applyUrl: 'https://aistudio.google.com/app/apikey', note: '创建 API key 后复制。' },
+  { match: /moonshot|kimi/i, label: '月之暗面开放平台', applyUrl: 'https://platform.moonshot.cn/console/api-keys', note: '创建密钥后复制。' },
+  { match: /zhipu|bigmodel|glm/i, label: '智谱开放平台', applyUrl: 'https://open.bigmodel.cn/usercenter/apikeys', note: '创建 API Key 后复制。' },
+  { match: /minimax/i, label: 'MiniMax 开放平台', applyUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key', note: '创建接口密钥后复制。' },
+  { match: /siliconflow/i, label: '硅基流动', applyUrl: 'https://cloud.siliconflow.cn/account/ak', note: '创建 API 密钥后复制。' },
+  { match: /openrouter/i, label: 'OpenRouter', applyUrl: 'https://openrouter.ai/keys', note: '创建 key 后复制。' },
+  { match: /volc|ark|doubao/i, label: '火山方舟', applyUrl: 'https://console.volcengine.com/ark', note: '开通后在「API Key 管理」创建。' },
+  { match: /groq/i, label: 'Groq Console', applyUrl: 'https://console.groq.com/keys', note: '创建 API key 后复制。' },
+  { match: /workbuddy/i, label: 'WorkBuddy', applyUrl: 'https://www.workbuddy.cn/', note: '登录后在账号设置里获取接入凭据。' },
+  { match: /openai/i, label: 'OpenAI 平台', applyUrl: 'https://platform.openai.com/api-keys', note: '创建 Secret key，形如 sk-…。' },
+]
+
+function environmentCommands(envName) {
+  return [
+    { os: 'windows', label: 'Windows（永久，改完要重启 DSH）', command: `setx ${envName} "你的值"` },
+    { os: 'powershell', label: 'PowerShell（仅当前会话）', command: `$env:${envName} = "你的值"` },
+    { os: 'unix', label: 'macOS / Linux（写进 shell 配置后重开终端）', command: `export ${envName}=你的值` },
+  ]
+}
+
+/**
+ * Turn one requirement into instructions: where to get the value, what to do
+ * with it, and what the schema itself says about the field.
+ * @param wanted - `{ haystack, envName, hint, kind }` for the requirement.
+ * @returns Guidance object for the UI and the agent tools.
+ */
+function resolveGuidance(wanted) {
+  const provider = PROVIDER_GUIDES.find((entry) => entry.match.test(wanted.haystack))
+  const guidance = {
+    provider: provider?.label ?? null,
+    applyUrl: provider?.applyUrl ?? null,
+    note: provider?.note ?? null,
+    hint: wanted.hint ?? null,
+    commands: wanted.kind === 'env' && wanted.envName !== undefined
+      ? environmentCommands(wanted.envName)
+      : [],
+  }
+  if (wanted.kind === 'login') {
+    guidance.note = '该插件需要登录或授权才能用。若下方「可一键授权」里有对应条目，点一下即可；否则到该插件自己的设置页完成登录。'
+  }
+  if (guidance.applyUrl === null && guidance.note === null && guidance.hint === null && guidance.commands.length === 0) {
+    guidance.note = '该字段由插件自行定义，申请方式见该插件的说明或它自己的设置页。'
+  }
+  return guidance
+}
+
+/**
+ * Match one requirement to an authorization flow this profile already
+ * registers, so the page can offer a button instead of a bare input.
+ * @param flowKeys - Keys of the registered flows.
+ * @param rowId - The row's patch id.
+ * @param path - The requirement's config path.
+ * @returns The matching flow key, or null.
+ */
+function authorizeBinding(flowKeys, rowId, path) {
+  const segments = String(path).split('.')
+  const at = segments.indexOf('providers')
+  const candidate = at >= 0 && segments.length > at + 1
+    ? `${rowId}/${segments[at + 1]}`
+    : `${rowId}/default`
+  return flowKeys.has(candidate) ? candidate : null
+}
+
+/**
  * Collect what still needs a human on this machine.
  * @param ctx - Cordis context.
  * @returns Requirement items for the guided page.
  */
 async function collectRequirements(ctx) {
   const inventory = await readInventory(ctx)
+  const flowKeys = new Set(readFlows(ctx).map((flow) => flow.key))
   const items = []
   for (const info of inventory.rows.values()) {
     const bundle = bundleOfRow(inventory, info.id)
@@ -1067,7 +1151,7 @@ async function collectRequirements(ctx) {
     const fromSchema = entrySchema(info.entry)
     const seen = new Set()
 
-    for (const path of fromSchema) {
+    for (const { path, description } of fromSchema) {
       const key = path.split('.').at(-1) ?? path
       if (isSecretKey(key)) {
         const value = readPath(effective, path)
@@ -1082,12 +1166,20 @@ async function collectRequirements(ctx) {
             path,
             label: `${title} · ${path}`,
             status: 'missing',
+            authorize: authorizeBinding(flowKeys, info.id, path),
+            guidance: resolveGuidance({
+              haystack: `${info.id} ${path} ${bundle?.name ?? ''}`,
+              hint: description,
+              kind: 'secret',
+            }),
           })
         }
       }
     }
 
-    walkConfig(effective, '', (key, path, value) => {
+    walkConfig(effective, '', (key, path, value, parent) => {
+      const baseURL = isRecord(parent) && typeof parent.baseURL === 'string' ? parent.baseURL : ''
+      const haystack = `${baseURL} ${info.id} ${bundle?.name ?? ''} ${bundle?.meta?.title ?? ''}`
       if (isEnvKey(key) && typeof value === 'string' && value !== '') {
         const present = typeof process.env[value] === 'string' && process.env[value] !== ''
         items.push({
@@ -1100,6 +1192,8 @@ async function collectRequirements(ctx) {
           label: `${title} · ${value}`,
           status: present ? 'ready' : 'missing',
           envName: value,
+          authorize: authorizeBinding(flowKeys, info.id, path),
+          guidance: resolveGuidance({ haystack: `${value} ${haystack}`, envName: value, kind: 'env' }),
         })
         return
       }
@@ -1115,6 +1209,8 @@ async function collectRequirements(ctx) {
           path,
           label: `${title} · ${path}`,
           status: missing ? 'missing' : 'ready',
+          authorize: authorizeBinding(flowKeys, info.id, path),
+          guidance: resolveGuidance({ haystack: `${key} ${path} ${haystack}`, kind: 'secret' }),
         })
         return
       }
@@ -1128,6 +1224,8 @@ async function collectRequirements(ctx) {
           path,
           label: `${title} · ${path}`,
           status: 'manual',
+          authorize: authorizeBinding(flowKeys, info.id, path),
+          guidance: resolveGuidance({ haystack: `${key} ${haystack}`, kind: 'login' }),
         })
       }
     })
@@ -1139,7 +1237,7 @@ function walkConfig(value, prefix, visit, depth = 0) {
   if (depth > 6 || !isRecord(value)) return
   for (const [key, entry] of Object.entries(value)) {
     const path = prefix === '' ? key : `${prefix}.${key}`
-    visit(key, path, entry)
+    visit(key, path, entry, value)
     if (isRecord(entry)) walkConfig(entry, path, visit, depth + 1)
   }
 }
@@ -1160,7 +1258,7 @@ async function handleRequirements(ctx, request, response) {
     return
   }
   const items = await collectRequirements(ctx)
-  writeJson(response, 200, { ok: true, items })
+  writeJson(response, 200, { ok: true, items, flows: readFlows(ctx), attempt: attemptView() })
 }
 
 async function handleConfigure(ctx, request, response) {
@@ -1188,6 +1286,228 @@ async function handleConfigure(ctx, request, response) {
   const next = setPath(current, path, value)
   await editor.edit(entry, () => next)
   writeJson(response, 200, { ok: true, changed: true })
+}
+
+// ---------------------------------------------------------------------------
+// One-click authorization (ctx.authorization flows)
+// ---------------------------------------------------------------------------
+
+/** At most one authorization attempt runs at a time for the whole profile. */
+const AUTHORIZATION_ATTEMPT = { current: null }
+
+function attemptView() {
+  const attempt = AUTHORIZATION_ATTEMPT.current
+  if (attempt === null) return null
+  const view = {
+    key: attempt.key,
+    label: attempt.label,
+    status: attempt.status,
+    notices: attempt.notices,
+    error: attempt.error,
+    startedAt: attempt.startedAt,
+  }
+  if (attempt.pending !== null && attempt.pending !== undefined) {
+    view.pending = {
+      id: attempt.pending.id,
+      kind: attempt.pending.kind,
+      message: attempt.pending.message,
+      placeholder: attempt.pending.placeholder ?? null,
+      options: attempt.pending.options ?? [],
+    }
+  }
+  return view
+}
+
+/**
+ * Flows this profile can start on the user's behalf.
+ * @param ctx - Cordis context.
+ * @returns One entry per registered authorization flow.
+ */
+function readFlows(ctx) {
+  const authorization = ctx.get('authorization')
+  if (authorization === undefined) return []
+  try {
+    return authorization.list().map((entry) => ({
+      key: String(entry.key),
+      label: entry.label,
+      methods: (entry.methods ?? []).map((method) => ({ id: method.id, label: method.label })),
+      inFlight: entry.inFlight === true,
+    }))
+  } catch {
+    return []
+  }
+}
+
+async function handleFlows(ctx, request, response) {
+  if (!admit(ctx, request, response, { mutation: false })) return
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    writeJson(response, 405, { ok: false, error: '请使用 GET。' })
+    return
+  }
+  writeJson(response, 200, { ok: true, flows: readFlows(ctx), attempt: attemptView() })
+}
+
+async function handleAuthorizeStart(ctx, request, response) {
+  if (!admit(ctx, request, response, { mutation: true })) return
+  if (request.method !== 'POST') {
+    writeJson(response, 405, { ok: false, error: '请使用 POST。' })
+    return
+  }
+  const body = await readJson(request)
+  const attempt = await beginAuthorization(ctx, body.key, body.method)
+  writeJson(response, 202, { ok: true, attempt })
+}
+
+/**
+ * Start one authorization flow and keep its notices for the UI to poll.
+ * @param ctx - Cordis context.
+ * @param key - Credential key from `readFlows`.
+ * @param method - Optional method id the flow offers.
+ * @returns The attempt's public view.
+ */
+async function beginAuthorization(ctx, key, method) {
+  const authorization = ctx.get('authorization')
+  if (authorization === undefined) throw new HttpError(503, '当前 profile 未挂载 authorization，无法一键授权。')
+  if (typeof key !== 'string' || key === '') throw new HttpError(400, '缺少要授权的凭据键。')
+  const entry = authorization.describe(key)
+  if (entry === undefined) throw new HttpError(404, '该授权入口已不存在，请刷新后重试。')
+  if (AUTHORIZATION_ATTEMPT.current !== null && AUTHORIZATION_ATTEMPT.current.status === 'running') {
+    throw new HttpError(409, '已有一个授权流程在进行，请先等它结束或取消。')
+  }
+
+  const attempt = {
+    key,
+    label: entry.label,
+    status: 'running',
+    notices: [],
+    error: null,
+    startedAt: new Date().toISOString(),
+    controller: new AbortController(),
+    pending: null,
+    resolve: null,
+    reject: null,
+  }
+  AUTHORIZATION_ATTEMPT.current = attempt
+
+  let promptSeq = 0
+  const interaction = {
+    notify(notice) {
+      attempt.notices.push({ message: notice.message, url: notice.url ?? null, code: notice.code ?? null })
+    },
+    prompt(prompt) {
+      // The flow asks the human something (usually the key itself). Hold the
+      // flow here, expose the question through the polled attempt, and resume
+      // it when the page posts the answer.
+      const id = `p${(promptSeq += 1)}`
+      return new Promise((resolve, reject) => {
+        const clear = () => {
+          attempt.pending = null
+          attempt.resolve = null
+          attempt.reject = null
+        }
+        attempt.pending = {
+          id,
+          kind: typeof prompt.kind === 'string' ? prompt.kind : 'text',
+          message: typeof prompt.message === 'string' ? prompt.message : '请填写授权所需的信息',
+          placeholder: typeof prompt.placeholder === 'string' ? prompt.placeholder : null,
+          options: Array.isArray(prompt.options) ? prompt.options : [],
+        }
+        attempt.resolve = (value) => {
+          clear()
+          resolve(value)
+        }
+        attempt.reject = (error) => {
+          clear()
+          reject(error)
+        }
+        if (prompt.signal !== undefined && prompt.signal !== null && typeof prompt.signal.addEventListener === 'function') {
+          prompt.signal.addEventListener('abort', () => {
+            if (attempt.pending !== null && attempt.pending !== undefined && attempt.pending.id === id) {
+              clear()
+              reject(new Error('授权已取消'))
+            }
+          }, { once: true })
+        }
+      })
+    },
+  }
+
+  void authorization.begin({
+    key,
+    method: typeof method === 'string' && method !== '' ? method : undefined,
+    interaction,
+    signal: attempt.controller.signal,
+  })
+    .then((outcome) => {
+      attempt.status = outcome.status === 'authorized' ? 'authorized' : 'cancelled'
+    })
+    .catch((error) => {
+      attempt.status = attempt.controller.signal.aborted ? 'cancelled' : 'failed'
+      if (attempt.status === 'failed') attempt.error = error instanceof Error ? error.message : String(error)
+    })
+    .finally(() => {
+      // The settled attempt stays readable so a poll after a fast flow still
+      // reports its outcome; the next start replaces it.
+      attempt.settledAt = new Date().toISOString()
+    })
+
+  return attemptView()
+}
+
+async function handleAuthorizeStatus(ctx, request, response) {
+  if (!admit(ctx, request, response, { mutation: false })) return
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    writeJson(response, 405, { ok: false, error: '请使用 GET。' })
+    return
+  }
+  writeJson(response, 200, { ok: true, attempt: attemptView() })
+}
+
+async function handleAuthorizeCancel(ctx, request, response) {
+  if (!admit(ctx, request, response, { mutation: true })) return
+  if (request.method !== 'POST') {
+    writeJson(response, 405, { ok: false, error: '请使用 POST。' })
+    return
+  }
+  const attempt = AUTHORIZATION_ATTEMPT.current
+  if (attempt === null || attempt.status !== 'running') {
+    writeJson(response, 200, { ok: true, attempt: attemptView() })
+    return
+  }
+  const authorization = ctx.get('authorization')
+  try {
+    authorization?.cancel?.(attempt.key)
+  } catch {
+    // The attempt may already have settled; aborting below is still correct.
+  }
+  attempt.reject?.(new Error('授权已取消'))
+  attempt.controller.abort()
+  attempt.status = 'cancelled'
+  writeJson(response, 200, { ok: true, attempt: attemptView() })
+}
+
+async function handleAuthorizeAnswer(ctx, request, response) {
+  if (!admit(ctx, request, response, { mutation: true })) return
+  if (request.method !== 'POST') {
+    writeJson(response, 405, { ok: false, error: '请使用 POST。' })
+    return
+  }
+  const body = await readJson(request)
+  const attempt = AUTHORIZATION_ATTEMPT.current
+  if (attempt === null || attempt.pending === null || attempt.pending === undefined) {
+    throw new HttpError(409, '当前没有等待回答的授权步骤，请刷新后重试。')
+  }
+  if (typeof body.id === 'string' && body.id !== '' && body.id !== attempt.pending.id) {
+    throw new HttpError(409, '该步骤已被替换，请刷新后重试。')
+  }
+  const value = typeof body.value === 'string' ? body.value.trim() : ''
+  if (value === '') throw new HttpError(400, '请填写内容后再提交。')
+  const resolve = attempt.resolve
+  attempt.pending = null
+  attempt.resolve = null
+  attempt.reject = null
+  if (typeof resolve === 'function') resolve(value)
+  writeJson(response, 200, { ok: true, attempt: attemptView() })
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,6 +1566,26 @@ function formatRequirement(group) {
   return `密钥 ${group.item.path}（${state}）· 行 ${rows}`
 }
 
+/**
+ * The how-to lines that turn a bare requirement into a next action.
+ * @param group - One requirement group.
+ * @returns Indented guidance lines, empty when nothing is known.
+ */
+function guidanceLines(group) {
+  const guidance = group.item.guidance
+  if (!isRecord(guidance)) return []
+  const lines = []
+  if (typeof guidance.provider === 'string' && typeof guidance.applyUrl === 'string') {
+    lines.push(`  ↳ 申请：${guidance.provider} ${guidance.applyUrl}`)
+  }
+  if (typeof guidance.note === 'string') lines.push(`  ↳ ${guidance.note}`)
+  if (typeof guidance.hint === 'string') lines.push(`  ↳ 字段说明：${guidance.hint}`)
+  const commands = Array.isArray(guidance.commands) ? guidance.commands : []
+  const command = commands.find((entry) => entry.os === 'windows') ?? commands[0]
+  if (command !== undefined && typeof command.command === 'string') lines.push(`  ↳ 写入示例：${command.command}`)
+  return lines
+}
+
 function formatPlan(payload, plan) {
   const pending = plan.steps.filter((step) => step.status === 'pending')
   const rowCount = payload.bundles.reduce((total, bundle) => total + bundle.rows.length, 0)
@@ -1282,7 +1622,10 @@ async function formatApplyOutcome(ctx, outcome) {
   }
   const groups = groupRequirements(missing)
   lines.push(`还有 ${groups.length} 项凭据待补齐（设置 → 分享与同步 → 首次配置 可直接填写）：`)
-  for (const group of groups) lines.push(`- ${formatRequirement(group)}`)
+  for (const group of groups) {
+    lines.push(`- ${formatRequirement(group)}`)
+    lines.push(...guidanceLines(group))
+  }
   return lines.join('\n')
 }
 
@@ -1346,9 +1689,94 @@ function createRequirementsTool(ctx) {
       const missing = items.filter((item) => item.status !== 'ready')
       const groups = groupRequirements(missing)
       const lines = [`[dsh-profile-share] 检出 ${items.length} 项，其中待补齐 ${groups.length} 项`]
-      for (const group of groups) lines.push(`- ${formatRequirement(group)}`)
+      for (const group of groups) {
+        lines.push(`- ${formatRequirement(group)}`)
+        lines.push(...guidanceLines(group))
+      }
       if (groups.length === 0) lines.push('没有待补齐的项。')
+      const flows = readFlows(ctx)
+      if (flows.length > 0) {
+        lines.push(`可一键授权 ${flows.length} 个（页面「首次配置」有按钮，或用 profile_share_authorize action=start）：`)
+        for (const flow of flows) lines.push(`- ${flow.label}（key=${flow.key}${flow.inFlight ? '，进行中' : ''}）`)
+      }
       return lines.join('\n')
+    },
+  }
+}
+
+function formatAttempt(mode, attempt) {
+  const lines = [`[dsh-profile-share] mode=${mode} key=${attempt.key} status=${attempt.status}`]
+  for (const notice of attempt.notices) {
+    const url = notice.url === null || notice.url === undefined ? '' : ` → ${notice.url}`
+    const code = notice.code === null || notice.code === undefined ? '' : `（码：${notice.code}）`
+    lines.push(`- ${notice.message}${url}${code}`)
+  }
+  if (attempt.error !== null && attempt.error !== undefined) lines.push(`错误：${attempt.error}`)
+  if (attempt.status === 'running') {
+    lines.push('流程进行中：把上面带链接的通知交给用户，完成后再查一次 action=status。')
+  }
+  return lines.join('\n')
+}
+
+/**
+ * One-click authorization: list what can be authorized, start one, read its
+ * state, or cancel it. Same engine as the settings page buttons.
+ * @param ctx - Cordis context owning the services.
+ * @returns Tool definition.
+ */
+function createAuthorizeTool(ctx) {
+  return {
+    name: 'profile_share_authorize',
+    description: '列出一键授权入口，或发起/查看/取消一次授权（action=list|start|status|cancel）。发起后返回该流程给出的链接与状态；需要人工输入的流程会明确失败，此时应引导用户去插件自己的设置页完成。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'start', 'status', 'cancel'], description: '要执行的动作。' },
+        key: { type: 'string', description: 'start / cancel 时的凭据键，取自 action=list 的结果。' },
+        method: { type: 'string', description: '可选：该流程提供的授权方式 id。' },
+      },
+      required: ['action'],
+    },
+    output: TEXT_OUTPUT,
+    execute: async (args) => {
+      const action = isRecord(args) && typeof args.action === 'string' ? args.action : 'list'
+      try {
+        if (action === 'list') {
+          const flows = readFlows(ctx)
+          if (flows.length === 0) return '[dsh-profile-share] 当前 profile 没有注册可一键授权的流程。'
+          const lines = [`[dsh-profile-share] 可一键授权 ${flows.length} 个：`]
+          for (const flow of flows) {
+            const methods = flow.methods.map((method) => method.label || method.id).join(' / ')
+            const suffix = methods === '' ? '' : `，方式：${methods}`
+            lines.push(`- ${flow.label}（key=${flow.key}${suffix}${flow.inFlight ? '，进行中' : ''}）`)
+          }
+          return lines.join('\n')
+        }
+        if (action === 'start') {
+          const attempt = await beginAuthorization(
+            ctx,
+            isRecord(args) ? args.key : undefined,
+            isRecord(args) ? args.method : undefined,
+          )
+          return formatAttempt('started', attempt)
+        }
+        if (action === 'cancel') {
+          const attempt = AUTHORIZATION_ATTEMPT.current
+          if (attempt === null) return '[dsh-profile-share] 当前没有进行中的授权。'
+          try {
+            ctx.get('authorization')?.cancel?.(attempt.key)
+          } catch {
+            // Already settled; the abort below still ends the attempt.
+          }
+          attempt.controller.abort()
+          attempt.status = 'cancelled'
+          return '[dsh-profile-share] 已取消当前授权。'
+        }
+        const attempt = attemptView()
+        return attempt === null ? '[dsh-profile-share] 当前没有进行中的授权。' : formatAttempt('status', attempt)
+      } catch (error) {
+        return `[dsh-profile-share] ${error instanceof Error ? error.message : String(error)}`
+      }
     },
   }
 }

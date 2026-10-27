@@ -204,6 +204,7 @@ function createCtx(profile, options = {}) {
       if (name === 'pluginManager') return manager
       if (name === 'configEditor') return editor
       if (name === 'profileContext') return options.profileContext
+      if (name === 'authorization') return options.authorization
       return undefined
     },
   }
@@ -612,11 +613,14 @@ log('a reload colliding with the previous generation waits instead of failing')
   apply(ctx)
   assert.equal(registered.length, 0, 'nothing is registered while the previous generation still owns the paths')
   await delay(900)
-  assert.equal(registered.length, 6, `every route registers once the paths free up (${registered.length})`)
+  const paths = new Set(registered.map((route) => route.path))
+  assert.equal(paths.size, registered.length, 'one registration per route')
+  assert.ok(registered.length >= 10, `every route registers once the paths free up (${registered.length})`)
 
   // The same context re-applying releases its own routes first instead of colliding.
   apply(ctx)
-  assert.equal(registered.length, 6, 're-applying on the same context keeps exactly one registration per route')
+  assert.equal(new Set(registered.map((route) => route.path)).size, registered.length, 're-applying keeps one registration per route')
+  assert.ok(registered.length >= 10, 're-applying on the same context does not drop routes')
   console.log('ok: duplicate-route collision retried, same-context re-apply is idempotent')
 }
 
@@ -674,6 +678,44 @@ log('agent tools drive the same plan and apply engine')
   const requirements = await requirementsTool.execute({})
   assert.match(requirements, /\[dsh-profile-share\]/)
   console.log('ok: tools preview → apply → requirements; bad code reported, not thrown')
+}
+
+log('requirements carry guidance and one-click authorization flows')
+{
+  const profile = createProfile()
+  const authorization = {
+    list: () => [{ key: 'example-login', label: '示例账号登录', methods: [{ id: 'browser', label: '浏览器登录' }], inFlight: false }],
+    describe: (key) => (key === 'example-login'
+      ? { key, label: '示例账号登录', methods: [{ id: 'browser', label: '浏览器登录' }], inFlight: false }
+      : undefined),
+    cancel: () => {},
+    begin: async ({ interaction }) => {
+      interaction.notify({ message: '在浏览器里完成登录', url: 'https://example.invalid/login' })
+      return { status: 'authorized' }
+    },
+  }
+  const routes = createCtx(profile, { authorization })
+
+  const requirements = await call(routes, 'requirements')
+  const envItem = requirements.json.items.find((item) => item.kind === 'env')
+  assert.ok(envItem !== undefined, 'env requirement present')
+  assert.ok(Array.isArray(envItem.guidance.commands) && envItem.guidance.commands.length > 0, 'env item explains how to set it')
+  assert.match(envItem.guidance.commands[0].command, /ALPHA_API_KEY/)
+
+  const flows = await call(routes, 'flows')
+  assert.equal(flows.json.flows.length, 1)
+
+  const started = await call(routes, 'authorize/start', { method: 'POST', body: { key: 'example-login' } })
+  assert.equal(started.status, 202)
+  assert.equal(started.json.attempt.status, 'running')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const status = await call(routes, 'authorize/status')
+  assert.equal(status.json.attempt.status, 'authorized', JSON.stringify(status.json))
+  assert.equal(status.json.attempt.notices[0].url, 'https://example.invalid/login')
+
+  const missing = await call(routes, 'authorize/start', { method: 'POST', body: { key: 'nope' } })
+  assert.equal(missing.status, 404)
+  console.log('ok: guidance commands, flow listing, started authorization with its notices')
 }
 
 console.log('\nAll local smoke checks passed.')

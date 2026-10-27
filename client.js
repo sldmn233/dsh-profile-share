@@ -892,6 +892,10 @@ window.__ModuleLoader__.load({
 
     function RequirementsTab(props) {
       const [items, setItems] = useState(null);
+      const [flows, setFlows] = useState([]);
+      const [attempt, setAttempt] = useState(null);
+      const [authorizing, setAuthorizing] = useState(false);
+      const [answerDraft, setAnswerDraft] = useState('');
       const [loading, setLoading] = useState(false);
       const [error, setError] = useState('');
       const [drafts, setDrafts] = useState({});
@@ -906,6 +910,8 @@ window.__ModuleLoader__.load({
         try {
           const payload = await requestJson('/api/dsh-profile-sync/requirements');
           setItems(Array.isArray(payload.items) ? payload.items : []);
+          setFlows(Array.isArray(payload.flows) ? payload.flows : []);
+          setAttempt(payload.attempt !== undefined && payload.attempt !== null ? payload.attempt : null);
         } catch (loadError) {
           setError(errorMessage(loadError));
         } finally {
@@ -916,6 +922,179 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (props.active === true) void load();
       }, [props.active, load]);
+
+      // Poll only while an authorization is running, one timer at a time.
+      useEffect(() => {
+        if (attempt === null || attempt.status !== 'running') return undefined;
+        let cancelled = false;
+        const timer = window.setTimeout(async () => {
+          try {
+            const payload = await requestJson('/api/dsh-profile-sync/authorize/status');
+            if (!cancelled) setAttempt(payload.attempt !== undefined && payload.attempt !== null ? payload.attempt : null);
+          } catch {
+            // Transient failures keep the attempt visible; the next tick retries.
+          }
+        }, 1200);
+        return () => {
+          cancelled = true;
+          window.clearTimeout(timer);
+        };
+      }, [attempt]);
+
+      const startFlow = async (key) => {
+        setAuthorizing(true);
+        setCopyNote('');
+        try {
+          const payload = await postJson('/api/dsh-profile-sync/authorize/start', { key });
+          setAttempt(payload.attempt !== undefined && payload.attempt !== null ? payload.attempt : null);
+          setAnswerDraft('');
+        } catch (startError) {
+          setCopyTone('warning');
+          setCopyNote(errorMessage(startError));
+        } finally {
+          setAuthorizing(false);
+        }
+      };
+
+      const cancelFlow = async () => {
+        setAuthorizing(true);
+        try {
+          const payload = await postJson('/api/dsh-profile-sync/authorize/cancel', {});
+          setAttempt(payload.attempt !== undefined && payload.attempt !== null ? payload.attempt : null);
+        } catch (cancelError) {
+          setCopyTone('warning');
+          setCopyNote(errorMessage(cancelError));
+        } finally {
+          setAuthorizing(false);
+        }
+      };
+
+      const copyCommand = async (command) => {
+        const copied = await copyToClipboard(command);
+        setCopyTone(copied ? 'success' : 'warning');
+        setCopyNote(copied ? '已复制命令：' + command : '复制失败，请手动选择命令文本');
+      };
+
+      const submitAnswer = async () => {
+        if (attempt === null || attempt.pending === undefined || attempt.pending === null) return;
+        const value = answerDraft.trim();
+        if (value === '') return;
+        setAuthorizing(true);
+        try {
+          const payload = await postJson('/api/dsh-profile-sync/authorize/answer', {
+            id: attempt.pending.id,
+            value,
+          });
+          setAttempt(payload.attempt !== undefined && payload.attempt !== null ? payload.attempt : null);
+          setAnswerDraft('');
+        } catch (answerError) {
+          setCopyTone('warning');
+          setCopyNote(errorMessage(answerError));
+        } finally {
+          setAuthorizing(false);
+        }
+      };
+
+      const renderGuidance = (item) => {
+        const guidance = item !== null && typeof item === 'object' ? item.guidance : null;
+        if (guidance === null || typeof guidance !== 'object') return null;
+        const rows = [];
+        if (typeof guidance.provider === 'string' && typeof guidance.applyUrl === 'string' && guidance.applyUrl !== '') {
+          rows.push(h('div', { key: 'apply', style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+            h('span', { style: mutedStyle }, '去 ' + guidance.provider + ' 申请：'),
+            h('a', {
+              href: guidance.applyUrl,
+              target: '_blank',
+              rel: 'noreferrer',
+              style: { color: 'inherit', textDecoration: 'underline', fontWeight: 600 },
+            }, '打开申请页 →')));
+        }
+        if (typeof guidance.note === 'string' && guidance.note !== '') {
+          rows.push(h('div', { key: 'note', style: microStyle }, guidance.note));
+        }
+        if (typeof guidance.hint === 'string' && guidance.hint !== '') {
+          rows.push(h('div', { key: 'hint', style: microStyle }, '字段说明：' + guidance.hint));
+        }
+        const commands = Array.isArray(guidance.commands) ? guidance.commands : [];
+        for (const command of commands) {
+          rows.push(h('div', { key: 'cmd-' + String(command.os), style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 } },
+            h('code', { style: monoStyle }, String(command.command)),
+            h(Button, { onClick: () => { void copyCommand(String(command.command)); } }, '复制')));
+        }
+        return rows.length === 0
+          ? null
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } }, rows);
+      };
+
+      const ATTEMPT_LABELS = { running: '进行中', authorized: '已完成', cancelled: '已取消', failed: '失败' };
+
+      const renderAttempt = () => {
+        if (attempt === null) return null;
+        const status = typeof attempt.status === 'string' ? attempt.status : '';
+        const pending = attempt.pending !== undefined && attempt.pending !== null ? attempt.pending : null;
+        const notices = Array.isArray(attempt.notices) ? attempt.notices : [];
+        return h('div', {
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            border: '1px solid ' + BORDER,
+            borderRadius: 8,
+            padding: '10px 12px',
+            background: 'rgba(128,128,128,.05)',
+            minWidth: 0,
+          },
+        },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            h('span', { style: { fontWeight: 600, wordBreak: 'break-word' } },
+              typeof attempt.label === 'string' && attempt.label !== '' ? attempt.label : String(attempt.key)),
+            h(Badge, { tone: status === 'authorized' ? 'ok' : status === 'failed' ? 'bad' : 'neutral' },
+              ATTEMPT_LABELS[status] !== undefined ? ATTEMPT_LABELS[status] : status),
+            status === 'running'
+              ? h(Button, { onClick: () => { void cancelFlow(); }, disabled: authorizing }, '取消')
+              : null),
+          notices.map((notice, index) => h('div', {
+            key: 'notice-' + index,
+            style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 },
+          },
+            h('span', { style: mutedStyle }, String(notice.message !== undefined ? notice.message : '')),
+            typeof notice.url === 'string' && notice.url !== ''
+              ? h('a', { href: notice.url, target: '_blank', rel: 'noreferrer', style: { color: 'inherit', textDecoration: 'underline' } }, '打开链接 →')
+              : null,
+            typeof notice.code === 'string' && notice.code !== ''
+              ? h('code', { style: monoStyle }, notice.code)
+              : null)),
+          pending === null
+            ? null
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+                h('div', { style: { fontWeight: 600, wordBreak: 'break-word' } }, String(pending.message !== undefined ? pending.message : '请填写')),
+                pending.kind === 'select'
+                  ? h('select', {
+                      style: inputStyle,
+                      value: answerDraft,
+                      onChange: (event) => { setAnswerDraft(event.target.value); },
+                    }, (Array.isArray(pending.options) ? pending.options : []).map((option) => h('option', {
+                      key: String(option.id),
+                      value: String(option.id),
+                    }, String(option.label !== undefined ? option.label : option.id))))
+                  : h('input', {
+                      type: pending.kind === 'secret' ? 'password' : 'text',
+                      value: answerDraft,
+                      spellCheck: false,
+                      autoComplete: 'off',
+                      placeholder: typeof pending.placeholder === 'string' ? pending.placeholder : '',
+                      style: inputStyle,
+                      onChange: (event) => { setAnswerDraft(event.target.value); },
+                    }),
+                h('div', null, h(Button, {
+                  onClick: () => { void submitAnswer(); },
+                  disabled: authorizing || answerDraft.trim() === '',
+                  primary: true,
+                }, '提交'))),
+          typeof attempt.error === 'string' && attempt.error !== ''
+            ? h(Alert, { tone: 'error', message: attempt.error })
+            : null);
+      };
 
       const setDraft = (key, value) => {
         setDrafts((previous) => ({ ...previous, [key]: value }));
@@ -1058,13 +1237,42 @@ window.__ModuleLoader__.load({
                 ? '缺配置'
                 : status === 'manual' ? '需手动' : status)),
           kind === 'secret'
-            ? renderSecretEditor(item, key)
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+                renderGuidance(item),
+                typeof item.authorize === 'string' && item.authorize !== ''
+                  ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                      h(Button, {
+                        onClick: () => { void startFlow(item.authorize); },
+                        disabled: authorizing || (attempt !== null && attempt.status === 'running'),
+                      }, '直接授权（插件流程）'),
+                      h('span', { style: microStyle }, '点这个不用手动填，插件会验证并写入自己的凭据记录。'))
+                  : null,
+                renderSecretEditor(item, key))
             : kind === 'env'
-              ? renderEnvItem(item)
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+                  renderGuidance(item),
+                  typeof item.authorize === 'string' && item.authorize !== ''
+                    ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                        h(Button, {
+                          onClick: () => { void startFlow(item.authorize); },
+                          disabled: authorizing || (attempt !== null && attempt.status === 'running'),
+                        }, '直接授权（插件流程）'),
+                        h('span', { style: microStyle }, '也可以在这里直接完成，不必改环境变量。'))
+                    : null,
+                  renderEnvItem(item))
               : kind === 'login'
-                ? h('div', { style: mutedStyle }, status === 'ready'
-                    ? '登录态已就绪。'
-                    : '该插件需要登录/授权，请到它自己的设置页完成。')
+                ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+                    renderGuidance(item),
+                    typeof item.authorize === 'string' && item.authorize !== ''
+                      ? h(Button, {
+                          onClick: () => { void startFlow(item.authorize); },
+                          disabled: authorizing || (attempt !== null && attempt.status === 'running'),
+                          primary: true,
+                        }, '开始登录 / 授权')
+                      : null,
+                    h('div', { style: mutedStyle }, status === 'ready'
+                      ? '登录态已就绪。'
+                      : '该插件需要登录/授权；没有一键入口时，请到它自己的设置页完成。'))
                 : h('div', { style: mutedStyle }, '无法识别的配置类型，请手动处理。'));
       };
 
@@ -1095,6 +1303,25 @@ window.__ModuleLoader__.load({
         items !== null && total === 0
           ? h('div', { style: mutedStyle }, '没有检测到需要补齐的密钥、环境变量或登录态。')
           : null,
+        flows.length > 0
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 } },
+              h('h4', { style: subheadingStyle }, '可一键授权（' + flows.length + '）'),
+              h('div', { style: microStyle }, '这些流程由插件自己注册：点一下可能在浏览器里完成登录，也可能在这里填一次密钥。'),
+              flows.slice(0, 8).map((flow) => h('div', {
+                key: 'flow-' + String(flow.key),
+                style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 },
+              },
+                h('span', { style: { flex: '1 1 220px', minWidth: 0, wordBreak: 'break-word' } },
+                  String(flow.label !== undefined ? flow.label : flow.key)),
+                h(Button, {
+                  onClick: () => { void startFlow(String(flow.key)); },
+                  disabled: authorizing || (attempt !== null && attempt.status === 'running'),
+                }, '开始'))),
+              flows.length > 8
+                ? h('div', { style: microStyle }, '还有 ' + (flows.length - 8) + ' 个未列出；需要时可用 profile_share_authorize 工具查询。')
+                : null)
+          : null,
+        renderAttempt(),
         groups.map((group) => h('div', {
           key: group.kind,
           style: { display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 },
